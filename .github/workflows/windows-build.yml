@@ -21,52 +21,54 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path build | Out-Null
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
-      - name: Build Dolphin Qt
+      - name: Build Dolphin
         shell: pwsh
         run: |
-          cmake --build build --config Release --target dolphin-emu --parallel
+          cmake --build build --config Release --parallel
 
-      - name: Locate and package Dolphin
+      - name: Find Dolphin EXE
         shell: pwsh
         run: |
           Write-Host "Searching for Dolphin EXE..."
-          Get-ChildItem -Path build -Recurse -File | Where-Object {
-            $_.Name -like "*dolphin*.exe"
-          } | Select-Object FullName
 
-          $exe = Get-ChildItem -Path build -Recurse -File | Where-Object {
-            $_.Name -like "*dolphin*.exe"
-          } | Select-Object -First 1
+          $exe = Get-ChildItem -Path build -Recurse -Include Dolphin.exe,dolphin-emu.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 
           if (-not $exe) {
-            Write-Error "No Dolphin EXE found. The build did not produce dolphin-emu.exe."
+            Write-Host "No Dolphin EXE found. Showing all executable outputs:"
+            Get-ChildItem -Path build -Recurse -Include *.exe,*.dll,*.pdb -ErrorAction SilentlyContinue | Select-Object FullName
+            Write-Error "No Dolphin executable found."
             exit 1
           }
 
-          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Write-Host "Found Dolphin EXE:"
+          Write-Host $exe.FullName
 
-          Copy-Item $exe.FullName package/ -Force
+          "DOLPHIN_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          Get-ChildItem -Path build -Recurse -File -Include *.dll | ForEach-Object {
-            Copy-Item $_.FullName package/ -Force
+      - name: Collect build files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+
+          Copy-Item $env:DOLPHIN_EXE artifact\
+
+          $exeDir = Split-Path $env:DOLPHIN_EXE -Parent
+
+          Get-ChildItem -Path $exeDir -Include *.dll,*.pdb,*.exe -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName artifact\ -Force
           }
 
-          Get-ChildItem -Path build -Recurse -File -Include *.pdb | ForEach-Object {
-            Copy-Item $_.FullName package/ -Force
+          Get-ChildItem -Path build -Recurse -Include *.dll -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName artifact\ -Force
           }
 
-          if (Test-Path Data/Sys) {
-            Copy-Item Data/Sys package/Sys -Recurse -Force
-          }
+          Write-Host "Artifact contents:"
+          Get-ChildItem artifact | Select-Object Name, Length
 
-          Write-Host "Final package contents:"
-          Get-ChildItem package -Recurse | Select-Object FullName
-
-      - name: Upload Dolphin Windows package
+      - name: Upload Dolphin build
         uses: actions/upload-artifact@v4
         with:
-          name: dolphin-windows-package
-          path: package/
+          name: Dolphin-Windows
+          path: artifact
