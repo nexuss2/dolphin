@@ -1,11 +1,16 @@
 // Copyright 2015 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#ifdef _WIN32
-#include <cstdio>
+#include <algorithm>
+#include <filesystem>
+#include <list>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <cstdio>
 #include <Windows.h>
 #endif
 
@@ -36,9 +41,11 @@
 #include "DolphinQt/QtUtils/AnalyticsPrompt.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/RunOnObject.h"
+
 #ifdef _WIN32
 #include "DolphinQt/QtUtils/SetWindowDecorations.h"
 #endif
+
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 #include "DolphinQt/Translation.h"
@@ -54,11 +61,6 @@ static bool QtMsgAlertHandler(const char* caption, const char* text, bool yes_no
   const bool called_from_gpu_thread = Core::IsGPUThread();
 
   std::optional<bool> r = RunOnObject(QApplication::instance(), [&] {
-    // If we were called from the CPU/GPU thread, set us as the CPU/GPU thread.
-    // This information is used in order to avoid deadlocks when calling e.g.
-    // Host::SetRenderFocus or Core::CPUThreadGuard. (Host::SetRenderFocus
-    // can get called automatically when a dialog steals the focus.)
-
     Common::ScopeGuard cpu_scope_guard(&Core::UndeclareAsCPUThread);
     Common::ScopeGuard gpu_scope_guard(&Core::UndeclareAsGPUThread);
 
@@ -77,6 +79,7 @@ static bool QtMsgAlertHandler(const char* caption, const char* text, bool yes_no
     message_box.setText(QString::fromUtf8(text));
 
     message_box.setStandardButtons(yes_no ? QMessageBox::Yes | QMessageBox::No : QMessageBox::Ok);
+
     if (style == Common::MsgType::Warning)
       message_box.addButton(QMessageBox::Ignore)->setText(QObject::tr("Ignore for this session"));
 
@@ -92,11 +95,12 @@ static bool QtMsgAlertHandler(const char* caption, const char* text, bool yes_no
       case Common::MsgType::Critical:
         return QMessageBox::Critical;
       }
-      // appease MSVC
+
       return QMessageBox::NoIcon;
     }());
 
     const int button = message_box.exec();
+
     if (button == QMessageBox::Yes)
       return true;
 
@@ -108,8 +112,10 @@ static bool QtMsgAlertHandler(const char* caption, const char* text, bool yes_no
 
     return false;
   });
+
   if (r.has_value())
     return *r;
+
   return false;
 }
 
@@ -122,6 +128,7 @@ int main(int argc, char* argv[])
 #ifdef _WIN32
   const bool console_attached = AttachConsole(ATTACH_PARENT_PROCESS) != FALSE;
   HANDLE stdout_handle = ::GetStdHandle(STD_OUTPUT_HANDLE);
+
   if (console_attached && stdout_handle)
   {
     freopen("CONOUT$", "w", stdout);
@@ -129,33 +136,29 @@ int main(int argc, char* argv[])
   }
 #endif
 
-#ifdef __APPLE__
-  // On macOS, a command line option matching the format "-psn_X_XXXXXX" is passed when
-  // the application is launched for the first time. This is to set the "ProcessSerialNumber",
-  // something used by the legacy Process Manager from Carbon. optparse will fail if it finds
-  // this as it isn't a valid Dolphin command line option, so pretend like it doesn't exist
-  // if found.
-  if (strncmp(argv[argc - 1], "-psn", 4) == 0)
+  if (argc > 0)
   {
-    argc--;
+    const std::filesystem::path exe_path = std::filesystem::absolute(argv[0]);
+    const std::filesystem::path exe_dir = exe_path.parent_path();
+
+    if (!exe_dir.empty() && std::filesystem::exists(exe_dir))
+      std::filesystem::current_path(exe_dir);
   }
+
+#ifdef __APPLE__
+  if (strncmp(argv[argc - 1], "-psn", 4) == 0)
+    argc--;
 #endif
 
 #ifdef __linux__
-  // Qt 6.3+ has a bug which causes mouse inputs to not be registered in our XInput2 code.
-  // If we define QT_XCB_NO_XI2, Qt's xcb platform plugin no longer initializes its XInput
-  // code, which makes mouse inputs work again.
-  // For more information: https://bugs.dolphin-emu.org/issues/12913
 #if (QT_VERSION >= QT_VERSION_CHECK(6, 3, 0))
   setenv("QT_XCB_NO_XI2", "1", true);
 #endif
-  // Dolphin currently doesn't work on Wayland (Only the UI does, games do not launch.) This makes
-  // XCB the default and forces it on if the platform is specified to be wayland, to prevent this
-  // from happening.
-  // For more information: https://bugs.dolphin-emu.org/issues/11807
+
   const char* current_qt_platform = getenv("QT_QPA_PLATFORM");
   const bool replace_qt_platform = current_qt_platform != nullptr &&
                                    Common::CaseInsensitiveContains(current_qt_platform, "wayland");
+
   setenv("QT_QPA_PLATFORM", "xcb", replace_qt_platform);
 #endif
 
@@ -163,7 +166,6 @@ int main(int argc, char* argv[])
   QCoreApplication::setOrganizationDomain(QStringLiteral("dolphin-emu.org"));
   QCoreApplication::setApplicationName(QStringLiteral("dolphin-emu"));
 
-  // QApplication will parse arguments and remove any it recognizes as targeting Qt
   QApplication app(argc, argv);
 
   auto parser = CommandLineParse::CreateParser(CommandLineParse::ParserOptions::IncludeGUIOptions);
@@ -172,7 +174,6 @@ int main(int argc, char* argv[])
 
 #ifdef _WIN32
   QtUtils::InstallWindowDecorationFilter(&app);
-
   FreeConsole();
 #endif
 
@@ -182,37 +183,35 @@ int main(int argc, char* argv[])
   Resources::Init();
   Settings::Instance().SetBatchModeEnabled(options.is_set("batch"));
 
-  // Hook up alerts from core
   Common::RegisterMsgAlertHandler(QtMsgAlertHandler);
-
-  // Hook up translations
   Translation::Initialize();
 
-  // Whenever the event loop is about to go to sleep, dispatch the jobs
-  // queued in the Core first.
   QObject::connect(QAbstractEventDispatcher::instance(), &QAbstractEventDispatcher::aboutToBlock,
                    &app, [] { Core::HostDispatchJobs(Core::System::GetInstance()); });
 
   std::optional<std::string> save_state_path;
+
   if (options.is_set("save_state"))
-  {
     save_state_path = static_cast<const char*>(options.get("save_state"));
-  }
 
   std::unique_ptr<BootParameters> boot;
   bool game_specified = false;
+
   if (options.is_set("exec"))
   {
     const std::list<std::string> paths_list = options.all("exec");
     const std::vector<std::string> paths{std::make_move_iterator(std::begin(paths_list)),
                                          std::make_move_iterator(std::end(paths_list))};
+
     boot = BootParameters::GenerateFromFile(
         paths, BootSessionData(save_state_path, DeleteSavestateAfterBoot::No));
+
     game_specified = true;
   }
   else if (options.is_set("nand_title"))
   {
     const std::string hex_string = static_cast<const char*>(options.get("nand_title"));
+
     if (hex_string.length() == 16)
     {
       const u64 title_id = std::stoull(hex_string, nullptr, 16);
@@ -222,13 +221,43 @@ int main(int argc, char* argv[])
     {
       ModalMessageBox::critical(nullptr, QObject::tr("Error"), QObject::tr("Invalid title ID."));
     }
+
     game_specified = true;
   }
   else if (!args.empty())
   {
     boot = BootParameters::GenerateFromFile(
         args.front(), BootSessionData(save_state_path, DeleteSavestateAfterBoot::No));
+
     game_specified = true;
+  }
+
+  if (!game_specified)
+  {
+    std::string game_path;
+
+    for (const auto& entry : std::filesystem::directory_iterator("."))
+    {
+      if (!entry.is_regular_file())
+        continue;
+
+      std::string ext = entry.path().extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+      if (ext == ".iso" || ext == ".gcm" || ext == ".ciso" || ext == ".rvz")
+      {
+        game_path = entry.path().string();
+        break;
+      }
+    }
+
+    if (!game_path.empty())
+    {
+      boot = BootParameters::GenerateFromFile(
+          game_path, BootSessionData(std::nullopt, DeleteSavestateAfterBoot::No));
+
+      game_specified = true;
+    }
   }
 
   int retval;
@@ -238,6 +267,7 @@ int main(int argc, char* argv[])
     ModalMessageBox::critical(
         nullptr, QObject::tr("Error"),
         QObject::tr("A save state cannot be loaded without specifying a game to launch."));
+
     retval = 1;
   }
   else if (Settings::Instance().IsBatchModeEnabled() && !game_specified)
@@ -245,12 +275,11 @@ int main(int argc, char* argv[])
     ModalMessageBox::critical(
         nullptr, QObject::tr("Error"),
         QObject::tr("Batch mode cannot be used without specifying a game to launch."));
+
     retval = 1;
   }
   else if (!boot && (Settings::Instance().IsBatchModeEnabled() || save_state_path))
   {
-    // A game to launch was specified, but it was invalid.
-    // An error has already been shown by code above, so exit without showing another error.
     retval = 1;
   }
   else
@@ -260,22 +289,21 @@ int main(int argc, char* argv[])
     Settings::Instance().InitDefaultPalette();
     Settings::Instance().ApplyStyle();
 
+    Config::SetCurrent(Config::MAIN_SKIP_IPL, false);
+
     MainWindow win{Core::System::GetInstance(), std::move(boot),
                    static_cast<const char*>(options.get("movie"))};
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
     if (!Config::Get(Config::MAIN_ANALYTICS_PERMISSION_ASKED))
     {
-      // To ensure that the analytics prompt appears aligned with the center of the main window,
-      // the dialog is only shown after the application is ready, as only then it is guaranteed that
-      // the main window has been placed in its final position.
       auto* const connection_context = new QObject(&win);
+
       QObject::connect(qApp, &QGuiApplication::applicationStateChanged, connection_context,
                        [connection_context, &win](const Qt::ApplicationState state) {
                          if (state != Qt::ApplicationState::ApplicationActive)
                            return;
 
-                         // Severe the connection after the first run.
                          delete connection_context;
 
                          ShowAnalyticsPrompt(&win);
@@ -287,6 +315,7 @@ int main(int argc, char* argv[])
     {
       auto* updater = new Updater(&win, Config::Get(Config::MAIN_AUTOUPDATE_UPDATE_TRACK),
                                   Config::Get(Config::MAIN_AUTOUPDATE_HASH_OVERRIDE));
+
       updater->start();
     }
 
@@ -305,7 +334,9 @@ int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int)
 {
   std::vector<std::string> args = Common::CommandLineToUtf8Argv(GetCommandLineW());
   const int argc = static_cast<int>(args.size());
+
   std::vector<char*> argv(args.size());
+
   for (size_t i = 0; i < args.size(); ++i)
     argv[i] = args[i].data();
 
