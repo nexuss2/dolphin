@@ -18,56 +18,59 @@ jobs:
         with:
           arch: x64
 
-      - name: Configure
+      - name: Configure Dolphin
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build Dolphin
+      - name: Build Dolphin Qt
         shell: pwsh
         run: |
-          cmake --build build --config Release --parallel
+          cmake --build build --config Release --target DolphinQt --parallel
 
       - name: Find Dolphin EXE
         shell: pwsh
         run: |
-          Write-Host "Searching for Dolphin EXE..."
+          Write-Host "Searching for Dolphin.exe..."
 
-          $exe = Get-ChildItem -Path build -Recurse -Include Dolphin.exe,dolphin-emu.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $exe = Get-ChildItem -Path . -Recurse -File -Include Dolphin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch "\\Externals\\" } |
+            Select-Object -First 1
 
           if (-not $exe) {
-            Write-Host "No Dolphin EXE found. Showing all executable outputs:"
-            Get-ChildItem -Path build -Recurse -Include *.exe,*.dll,*.pdb -ErrorAction SilentlyContinue | Select-Object FullName
-            Write-Error "No Dolphin executable found."
+            Write-Host "Dolphin.exe not found. Showing all EXE files:"
+            Get-ChildItem -Path . -Recurse -File -Include *.exe -ErrorAction SilentlyContinue |
+              Select-Object FullName
+
+            Write-Error "No Dolphin.exe found. The DolphinQt target may not have built."
             exit 1
           }
 
-          Write-Host "Found Dolphin EXE:"
+          Write-Host "Found Dolphin.exe:"
           Write-Host $exe.FullName
 
           "DOLPHIN_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DOLPHIN_DIR=$($exe.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Collect build files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
 
-          Copy-Item $env:DOLPHIN_EXE artifact\
+          Copy-Item "$env:DOLPHIN_EXE" artifact\ -Force
 
-          $exeDir = Split-Path $env:DOLPHIN_EXE -Parent
-
-          Get-ChildItem -Path $exeDir -Include *.dll,*.pdb,*.exe -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Get-ChildItem -Path "$env:DOLPHIN_DIR" -File -Include *.dll,*.pdb,*.exe -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName artifact\ -Force
           }
 
-          Get-ChildItem -Path build -Recurse -Include *.dll -File -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName artifact\ -Force
+          if (Test-Path "Data") {
+            Copy-Item "Data" artifact\Data -Recurse -Force
           }
 
           Write-Host "Artifact contents:"
-          Get-ChildItem artifact | Select-Object Name, Length
+          Get-ChildItem artifact -Recurse | Select-Object FullName, Length
 
-      - name: Upload Dolphin build
+      - name: Upload Dolphin Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: Dolphin-Windows
