@@ -24,26 +24,25 @@ jobs:
           cd build
           cmake .. -G "Visual Studio 17 2022" -A x64
 
-      - name: Show available targets
-        run: |
-          cmake --build build --config Release --target help
-
       - name: Build Dolphin Qt
         run: |
           cmake --build build --config Release --target dolphin-emu --parallel
 
-      - name: Find Dolphin files
+      - name: Find output files
         shell: pwsh
         run: |
-          Get-ChildItem -Path build -Recurse | Where-Object {
-            $_.Name -match "dolphin.*\.(exe|dll|pdb)$" -or $_.FullName -match "Binaries"
-          } | Select-Object FullName
+          Get-ChildItem -Path build -Recurse -Include *.exe,*.dll,*.pdb | Select-Object FullName
+          Get-ChildItem -Path build -Recurse -Directory | Where-Object { $_.Name -eq "Sys" -or $_.Name -eq "Binaries" } | Select-Object FullName
 
-      - name: Upload Dolphin build
+      - name: Upload Dolphin Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: dolphin-windows-build
+          name: dolphin-windows-package
           path: |
             build/Binaries/**/*
+            build/**/*.dll
+            build/**/*.exe
+            build/**/*.pdb
+            Data/Sys/**/*
             !build/**/CompilerId*.exe
             !build/**/CMakeFiles/**/*
