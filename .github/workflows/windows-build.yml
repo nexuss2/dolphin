@@ -29,10 +29,17 @@ jobs:
 
       - name: Build Release
         run: |
-          cmake --build build --config Release --parallel
+          cmake --build build --config Release --target dolphin-emu --parallel
 
-      - name: Upload Dolphin EXE
+      - name: Show build output
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path build -Recurse -Filter *.exe | Select-Object FullName
+
+      - name: Upload Windows EXE files
         uses: actions/upload-artifact@v4
         with:
-          name: dolphin-windows-build
-          path: build/Binaries/Release/
+          name: dolphin-windows-exe
+          path: |
+            build/**/*.exe
+            build/Binaries/**
